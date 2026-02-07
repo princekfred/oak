@@ -88,9 +88,6 @@ def gs_exact(
             hf_state=hf_state,
         )
 
-    elapsed = time.time() - t0
-    print(f"Optimization time: {elapsed:.2f}s")
-
     print("\nOptimal parameters:\n", list(params))
     print("Energy minimum = ", energy)
 
