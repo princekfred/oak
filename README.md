@@ -15,3 +15,12 @@ python run.py
 ```
 
 `Vqe.gs_exact` will prefer the `lightning.qubit` device and fall back to `default.qubit` if Lightning isn't available.
+
+## Exact (non‑Trotterized) UCCSD (small systems)
+
+`vqeex.gs_exact` constructs the *combined* UCCSD generator and applies `exp(-iG)`
+via dense matrix exponentiation (not scalable, but removes Trotter error):
+
+```bash
+python run_exact.py
+```
