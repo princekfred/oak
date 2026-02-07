@@ -1,3 +1,4 @@
 pennylane
 pennylane-lightning
 pyscf
+numpy
