@@ -103,8 +103,24 @@ def gs_exact(
     t1 = params[:n_s]
     t2 = params[n_s:]
 
+    def _canon_pair(p, q):
+        """Put mixed-spin pairs in (even, odd) order; return (p2, q2, sign)."""
+        p, q = int(p), int(q)
+        sign = 1.0
+        if (p % 2) != (q % 2):
+            if p % 2 == 1:  # (odd, even) -> swap
+                p, q = q, p
+                sign *= -1.0
+        else:
+            if p > q:  # keep same-spin pairs ascending (should already be)
+                p, q = q, p
+                sign *= -1.0
+        return p, q, sign
+
     for (i, j, a, b), amp in zip(doubles, t2):
-        print(f"{a}^ {b}^ {i} {j} \t| {amp}")
+        a2, b2, s_ab = _canon_pair(a, b)
+        i2, j2, s_ij = _canon_pair(i, j)
+        print(f"{a2}^ {b2}^ {i2} {j2} \t| {s_ab * s_ij * amp}")
 
     for (i, a), amp in zip(singles, t1):
         print(f"{a}^ {i} \t| {amp}")

@@ -2,14 +2,22 @@ import Vqe
 
 
 def main():
+    try:
+        from pennylane import numpy as pnp
+    except ModuleNotFoundError:
+        pnp = None
+
     r = 1.88973
     symbols = ["H", "H", "H", "H"]
-    geometry = [
+    coords = [
         [0.0, 0.0, 0.0],
         [0.0, 0.0, 3.0 * r],
         [0.0, 0.0, 6.0 * r],
         [0.0, 0.0, 9.0 * r],
     ]
+    geometry = (
+        pnp.array(coords, dtype=float, requires_grad=False) if pnp is not None else coords
+    )
 
     active_electrons = 4
     active_orbitals = 4
