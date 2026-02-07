@@ -15,6 +15,21 @@ Implementation notes:
 """
 
 
+def _as_operator(generator):
+    """Normalize various PennyLane generator return formats to an operator.
+
+    PennyLane may return the generator as an operator or as a tuple of
+    ``(op, scalar)`` / ``(scalar, op)``.
+    """
+    if isinstance(generator, tuple) and len(generator) == 2:
+        a, b = generator
+        if hasattr(a, "wires") and not hasattr(b, "wires"):
+            return a * b
+        if hasattr(b, "wires") and not hasattr(a, "wires"):
+            return b * a
+    return generator
+
+
 def _wire0_is_msb(qml, wire_order):
     """Infer computational-basis bit ordering for the given ``wire_order``."""
     if len(wire_order) <= 1:
@@ -103,6 +118,7 @@ def gs_exact(
     singles first, then doubles.
     """
     import time
+    import warnings
 
     try:
         import pennylane as qml
@@ -160,18 +176,111 @@ def gs_exact(
 
     singles, doubles = qml.qchem.excitations(active_electrons, n_qubits)
 
-    wire0_is_msb = _wire0_is_msb(qml, wire_order)
-    a_ops, adag_ops = _creation_annihilation_mats(
-        n_modes=n_qubits, wire_order=wire_order, wire0_is_msb=wire0_is_msb
-    )
+    def _canon_pair(p, q):
+        """Put mixed-spin pairs in (even, odd) order; return (p2, q2, sign)."""
+        p, q = int(p), int(q)
+        sign = 1.0
+        if (p % 2) != (q % 2):
+            if p % 2 == 1:  # (odd, even) -> swap
+                p, q = q, p
+                sign *= -1.0
+        else:
+            if p > q:  # keep same-spin pairs ascending
+                p, q = q, p
+                sign *= -1.0
+        return p, q, sign
+
+    def _single_sort_key(ex):
+        i, a = ex
+        i, a = int(i), int(a)
+        return (i // 2, a // 2, i % 2, a, i)
+
+    def _double_sort_key(ex):
+        i, j, a, b = ex
+        i, j, a, b = int(i), int(j), int(a), int(b)
+
+        i2, j2, _ = _canon_pair(i, j)
+        a2, b2, _ = _canon_pair(a, b)
+
+        mixed_spin = (i % 2) != (j % 2)
+        if mixed_spin:
+            category = 0
+        else:
+            category = 1 if (i % 2) == 0 else 2
+
+        return (category, a2 // 2, b2 // 2, i2 // 2, j2 // 2, a2, b2, i2, j2)
+
+    singles = sorted(singles, key=_single_sort_key)
+    doubles = sorted(doubles, key=_double_sort_key)
 
     # Build anti-Hermitian generators K_k so U(params)=exp(sum_k params[k] * K_k).
+    #
+    # Prefer extracting generators from PennyLane's *fermionic excitation gates*.
+    # This matches PennyLane's conventions (Jordan–Wigner strings, scaling, and
+    # wire ordering). Fall back to an explicit Jordan–Wigner construction if the
+    # fermionic gates aren't available.
+    fse = getattr(qml, "FermionicSingleExcitation", None)
+    fde = getattr(qml, "FermionicDoubleExcitation", None)
+
+    def _make_gate(op_cls, theta, wires):
+        try:
+            return op_cls(theta, wires=wires)
+        except TypeError:
+            if (
+                isinstance(wires, (list, tuple))
+                and len(wires) == 2
+                and isinstance(wires[0], (list, tuple))
+                and isinstance(wires[1], (list, tuple))
+            ):
+                return op_cls(theta, wires1=wires[0], wires2=wires[1])
+            raise
+
+    def _generator_matrix(op_cls, wires, *, wire_order, eps=1e-7):
+        """Return the Hermitian generator matrix G for U(theta)=exp(-i*theta*G)."""
+        try:
+            op0 = _make_gate(op_cls, 0.0, wires)
+            gen_op = _as_operator(qml.generator(op0))
+            return np.asarray(qml.matrix(gen_op, wire_order=wire_order), dtype=complex)
+        except Exception:
+            u_plus = np.asarray(
+                qml.matrix(_make_gate(op_cls, eps, wires), wire_order=wire_order),
+                dtype=complex,
+            )
+            u_minus = np.asarray(
+                qml.matrix(_make_gate(op_cls, -eps, wires), wire_order=wire_order),
+                dtype=complex,
+            )
+            return 1j * (u_plus - u_minus) / (2 * eps)
+
     k_mats = []
-    for (i, a) in singles:
-        k_mats.append(adag_ops[a] @ a_ops[i] - adag_ops[i] @ a_ops[a])
-    for (i, j, a, b) in doubles:
-        t = adag_ops[a] @ adag_ops[b] @ a_ops[j] @ a_ops[i]
-        k_mats.append(t - t.conj().T)
+    if fse is not None and fde is not None:
+        print("Generator: PennyLane fermionic excitation gates")
+        s_wires, d_wires = qml.qchem.excitations_to_wires(singles, doubles)
+        for wires in s_wires:
+            g = _generator_matrix(fse, wires, wire_order=wire_order)
+            k_mats.append(-1j * g)
+        for wires in d_wires:
+            g = _generator_matrix(fde, wires, wire_order=wire_order)
+            k_mats.append(-1j * g)
+    else:
+        warnings.warn(
+            "Falling back to an explicit Jordan–Wigner construction of UCCSD generators. "
+            "This should match PennyLane's mapping, but if you have "
+            "`qml.FermionicSingleExcitation`/`qml.FermionicDoubleExcitation` available, "
+            "those are preferred.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        wire0_is_msb = _wire0_is_msb(qml, wire_order)
+        a_ops, adag_ops = _creation_annihilation_mats(
+            n_modes=n_qubits, wire_order=wire_order, wire0_is_msb=wire0_is_msb
+        )
+
+        for (i, a) in singles:
+            k_mats.append(adag_ops[a] @ a_ops[i] - adag_ops[i] @ a_ops[a])
+        for (i, j, a, b) in doubles:
+            t = adag_ops[a] @ adag_ops[b] @ a_ops[j] @ a_ops[i]
+            k_mats.append(t - t.conj().T)
 
     k_stack = np.stack(k_mats, axis=0)
     x0 = np.zeros(k_stack.shape[0], dtype=float)
@@ -219,9 +328,10 @@ def gs_exact(
     t2 = params[n_s:]
 
     for (i, j, a, b), amp in zip(doubles, t2):
-        print(f"{a}^ {b}^ {i} {j} \t| {amp}")
+        a2, b2, s_ab = _canon_pair(a, b)
+        i2, j2, s_ij = _canon_pair(i, j)
+        print(f"{a2}^ {b2}^ {i2} {j2} \t| {s_ab * s_ij * amp}")
     for (i, a), amp in zip(singles, t1):
         print(f"{a}^ {i} \t| {amp}")
 
     return params
-

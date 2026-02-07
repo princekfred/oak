@@ -25,6 +25,12 @@ def gs_exact(
             "  python -m pip install pennylane pennylane-lightning pyscf"
         ) from exc
 
+    # PennyLane's qchem helpers expect NumPy semantics (e.g., `.flatten()`).
+    try:
+        geometry = np.array(geometry, dtype=float, requires_grad=False)
+    except TypeError:
+        geometry = np.array(geometry, dtype=float)
+
     # Build the electronic Hamiltonian
     try:
         H, qubits = qml.qchem.molecular_hamiltonian(
