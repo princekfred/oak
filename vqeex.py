@@ -87,6 +87,64 @@ def _creation_annihilation_mats(*, n_modes, wire_order, wire0_is_msb):
     return a, adag
 
 
+def _canon_pair(p, q):
+    """Put mixed-spin pairs in (even, odd) order; return (p2, q2, sign)."""
+    p, q = int(p), int(q)
+    sign = 1.0
+    if (p % 2) != (q % 2):
+        if p % 2 == 1:  # (odd, even) -> swap
+            p, q = q, p
+            sign *= -1.0
+    else:
+        if p > q:  # keep same-spin pairs ascending
+            p, q = q, p
+            sign *= -1.0
+    return p, q, sign
+
+
+def _double_print_key(ex):
+    i, j, a, b = ex
+    a2, b2, _ = _canon_pair(a, b)
+    i2, j2, _ = _canon_pair(i, j)
+    mixed_spin = (i % 2) != (j % 2)
+    if mixed_spin:
+        category = 0
+    else:
+        category = 1 if (i % 2) == 0 else 2
+    return (category, a2 // 2, b2 // 2, i2 // 2, j2 // 2, a2, b2, i2, j2)
+
+
+def _single_print_key(ex):
+    i, a = ex
+    return (i // 2, a // 2, i % 2, a, i)
+
+
+def _print_amplitudes(*, singles, doubles, params):
+    """Print parameters in the expected `a^ b^ i j` / `a^ i` notation and order."""
+    import numpy as np
+
+    print("\nPrinting amplitudes")
+    print("Operator\tAmplitude")
+    print("++++++++++++++++++++++++++++++")
+
+    n_s = len(singles)
+    t1 = np.asarray(params[:n_s], dtype=float)
+    t2 = np.asarray(params[n_s:], dtype=float)
+
+    t1_map = {tuple(ex): float(val) for ex, val in zip(singles, t1)}
+    t2_map = {tuple(ex): float(val) for ex, val in zip(doubles, t2)}
+
+    for i, j, a, b in sorted(doubles, key=_double_print_key):
+        a2, b2, s_ab = _canon_pair(a, b)
+        i2, j2, s_ij = _canon_pair(i, j)
+        amp = t2_map[(i, j, a, b)]
+        print(f"{a2}^ {b2}^ {i2} {j2} \t| {s_ab * s_ij * amp}")
+
+    for i, a in sorted(singles, key=_single_print_key):
+        amp = t1_map[(i, a)]
+        print(f"{a}^ {i} \t| {amp}")
+
+
 def gs_exact(
     symbols,
     geometry,
@@ -96,6 +154,8 @@ def gs_exact(
     shots=None,
     max_iter=100,
     opt_method="BFGS",
+    method="pyscf",
+    basis="sto-3g",
 ):
     """Optimize a non‑Trotterized UCCSD ansatz using dense matrices.
 
@@ -134,59 +194,42 @@ def gs_exact(
     except TypeError:
         geometry = pnp.array(geometry, dtype=float)
 
-    H, n_qubits = qml.qchem.molecular_hamiltonian(
-        symbols,
-        geometry,
-        basis="sto-3g",
-        method="pyscf",
-        active_electrons=active_electrons,
-        active_orbitals=active_orbitals,
-        charge=charge,
-    )
+    try:
+        H, n_qubits = qml.qchem.molecular_hamiltonian(
+            symbols,
+            geometry,
+            basis=basis,
+            method=method,
+            active_electrons=active_electrons,
+            active_orbitals=active_orbitals,
+            charge=charge,
+        )
+    except ModuleNotFoundError as exc:
+        if method == "pyscf":
+            raise ModuleNotFoundError(
+                "Failed to build the molecular Hamiltonian. For `method=\"pyscf\"`, install PySCF:\n"
+                "  python -m pip install pyscf"
+            ) from exc
+        raise
 
     wire_order = list(range(n_qubits))
     hf_state = qml.qchem.hf_state(active_electrons, n_qubits)
 
     h_mat = np.asarray(qml.matrix(H, wire_order=wire_order), dtype=complex)
 
-    dev = qml.device("default.qubit", wires=n_qubits)
-
-    @qml.qnode(dev)
-    def _hf_statevector():
-        qml.BasisState(hf_state, wires=wire_order)
-        return qml.state()
-
-    hf_vec = np.asarray(_hf_statevector(), dtype=complex)
-
-    def order_pair(i, j):
-        if (i % 2) != (j % 2):
-            return (i, j) if (i % 2) == 0 else (j, i)
-        return (i, j) if i <= j else (j, i)
-
-    def normalize_double(ex):
-        i, j, a, b = ex
-        i, j = order_pair(i, j)
-        a, b = order_pair(a, b)
-        return (i, j, a, b)
-
-    def double_sort_key(ex):
-        i, j, a, b = ex
-        mixed_spin = (i % 2) != (j % 2)
-        if mixed_spin:
-            category = 0
-        else:
-            category = 1 if (i % 2) == 0 else 2
-        return (category, a // 2, b // 2, i // 2, j // 2, a, b, i, j)
-
-    def single_sort_key(ex):
-        i, a = ex
-        return (i // 2, a // 2, i % 2, a, i)
-
     singles, doubles = qml.qchem.excitations(active_electrons, n_qubits)
-    singles = sorted(singles, key=single_sort_key)
-    doubles = sorted((normalize_double(ex) for ex in doubles), key=double_sort_key)
 
     wire0_is_msb = _wire0_is_msb(qml, wire_order)
+    dim = 1 << n_qubits
+
+    hf_vec = np.zeros(dim, dtype=complex)
+    occ_wires = np.nonzero(np.asarray(hf_state, dtype=int))[0]
+    hf_idx = 0
+    for w in occ_wires:
+        bit = (n_qubits - 1 - int(w)) if wire0_is_msb else int(w)
+        hf_idx |= 1 << bit
+    hf_vec[hf_idx] = 1.0
+
     a_ops, adag_ops = _creation_annihilation_mats(
         n_modes=n_qubits, wire_order=wire_order, wire0_is_msb=wire0_is_msb
     )
@@ -235,18 +278,6 @@ def gs_exact(
     print("\nOptimal parameters:\n", list(params))
     print("Energy minimum = ", e_min)
 
-    # Print amplitudes in the same convention/order as Vqe.py (doubles then singles).
-    print("\nPrinting amplitudes")
-    print("Operator\tAmplitude")
-    print("++++++++++++++++++++++++++++++")
-
-    n_s = len(singles)
-    t1 = params[:n_s]
-    t2 = params[n_s:]
-
-    for (i, j, a, b), amp in zip(doubles, t2):
-        print(f"{a}^ {b}^ {i} {j} \t| {amp}")
-    for (i, a), amp in zip(singles, t1):
-        print(f"{a}^ {i} \t| {amp}")
+    _print_amplitudes(singles=singles, doubles=doubles, params=params)
 
     return params

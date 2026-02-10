@@ -24,3 +24,15 @@ via dense matrix exponentiation (not scalable, but removes Trotter error):
 ```bash
 python run_exact.py
 ```
+
+To run the QSC-EOM excited-state routine on top of the exact ansatz:
+
+```bash
+python run_exact.py qsceom
+```
+
+If you don't have PySCF installed, use the built-in differentiable Hartree-Fock backend:
+
+```bash
+python run_exact.py qsceom dhf
+```
