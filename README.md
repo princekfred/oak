@@ -1,7 +1,3 @@
-# oak
-
-Small PennyLane VQE example.
-
 ## Setup
 
 ```bash
